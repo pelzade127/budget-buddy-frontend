@@ -1,6 +1,0 @@
-# Backend API URL
-# For local development:
-VITE_API_URL=http://localhost:3001
-
-# For production (update with your Railway backend URL):
-# VITE_API_URL=https://backend-production-6e92.up.railway.app
