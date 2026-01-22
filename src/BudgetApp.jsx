@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { PlusCircle, TrendingDown, Calendar, Settings, Home, BarChart3, Check, X, ChevronRight, Edit2, Trash2, DollarSign, Palette, Plus, ChevronLeft, ChevronRight as ChevronRightIcon, PieChart } from 'lucide-react';
-
+import { categoriesAPI, userAPI, transactionsAPI } from './api';
 // Theme definitions
 const THEMES = {
   purple: {
@@ -47,7 +47,7 @@ const THEMES = {
   }
 };
 
-// Default categories
+// Default categories (total: $3,000 to match default income)
 const DEFAULT_CATEGORIES = [
   { id: 1, name: 'Groceries', limit: 400, spent: 0 },
   { id: 2, name: 'Rent/Mortgage', limit: 1200, spent: 0 },
@@ -55,18 +55,22 @@ const DEFAULT_CATEGORIES = [
   { id: 4, name: 'Transportation', limit: 200, spent: 0 },
   { id: 5, name: 'Entertainment', limit: 100, spent: 0 },
   { id: 6, name: 'Dining Out', limit: 150, spent: 0 },
-  { id: 7, name: 'Shopping', limit: 150, spent: 0 },
+  { id: 7, name: 'Shopping', limit: 100, spent: 0 }, // Changed from 150 to 100
   { id: 8, name: 'Healthcare', limit: 100, spent: 0 },
   { id: 9, name: 'Subscriptions', limit: 50, spent: 0 },
   { id: 10, name: 'Savings', limit: 300, spent: 0 },
   { id: 11, name: 'Debt Payments', limit: 200, spent: 0 },
-  { id: 12, name: 'Miscellaneous', limit: 100, spent: 0 }
+  { id: 12, name: 'Miscellaneous', limit: 50, spent: 0 } // Changed from 100 to 50
 ];
 
 const App = () => {
   const [currentView, setCurrentView] = useState('home');
-  const [isFirstTime, setIsFirstTime] = useState(true);
+  const [isFirstTime, setIsFirstTime] = useState(false); // Start as false
+  const [isLoading, setIsLoading] = useState(true); // Add loading state
   const [setupStep, setSetupStep] = useState(0);
+  
+  // Ref to prevent double category creation (React StrictMode issue)
+  const categoriesCreated = useRef(false);
   
   // User data
   const [theme, setTheme] = useState('purple');
@@ -182,49 +186,130 @@ const App = () => {
     }
   };
 
-  // Load data from localStorage on mount
+  // Load data from localStorage and backend
   useEffect(() => {
-    try {
-      const setupComplete = localStorage.getItem('setup_complete');
-      if (setupComplete === 'true') {
-        setIsFirstTime(false);
+    const loadData = async () => {
+      let userProfile = null; // Define outside try blocks so it's accessible everywhere
+      
+      try {
+        // Load user profile from backend to get monthly income and theme
+        try {
+          userProfile = await userAPI.getProfile();
+          if (userProfile) {
+            if (userProfile.monthly_income) {
+              setMonthlyIncome(parseFloat(userProfile.monthly_income));
+            }
+            if (userProfile.theme) {
+              setTheme(userProfile.theme);
+            }
+          }
+        } catch (error) {
+          console.error('Error loading user profile:', error);
+        }
+
+        // Load categories from backend
+        try {
+          const categoriesData = await categoriesAPI.getAll();
+          console.log('Categories from backend:', categoriesData); // Debug
+          
+          if (categoriesData && categoriesData.length > 0) {
+            const formattedCategories = categoriesData.map(cat => ({
+              id: cat.id,
+              name: cat.name,
+              limit: parseFloat(cat.limit_amount),
+              spent: parseFloat(cat.spent)
+            }));
+            console.log('Loaded categories from backend:', formattedCategories); // Debug
+            setCategories(formattedCategories);
+            
+            // Only skip setup if user has income set (completed setup before)
+            if (userProfile && userProfile.monthly_income && userProfile.monthly_income > 0) {
+              setIsFirstTime(false); // Returning user with income - skip setup
+            } else {
+              setIsFirstTime(true); // Need to do setup (no income set)
+            }
+          } else {
+            // No categories yet - create defaults for new user
+            // But ONLY if categories state is still default (prevent double-run)
+            if (!categoriesCreated.current) {
+              categoriesCreated.current = true; // Mark as creating
+              console.log('No categories found, creating defaults...');
+              const createdCategories = [];
+              const failedCategories = [];
+              
+              // Create each default category in the backend
+              for (const defaultCat of DEFAULT_CATEGORIES) {
+                try {
+                  const newCat = await categoriesAPI.create({
+                    name: defaultCat.name,
+                    limit: defaultCat.limit
+                  });
+                  createdCategories.push({
+                    id: newCat.id,
+                    name: newCat.name,
+                    limit: parseFloat(newCat.limit_amount),
+                    spent: 0
+                  });
+                  console.log(`✅ Created: ${defaultCat.name}`);
+                } catch (err) {
+                  console.error(`❌ Failed to create category ${defaultCat.name}:`, err);
+                  failedCategories.push(defaultCat.name);
+                }
+              }
+              
+              console.log(`Created ${createdCategories.length} of ${DEFAULT_CATEGORIES.length} categories`);
+              if (failedCategories.length > 0) {
+                console.error(`Failed categories:`, failedCategories);
+              }
+              console.log('Setting categories to:', createdCategories); // Debug
+              setCategories(createdCategories);
+            } else {
+              console.log('Skipping category creation - already created or in progress');
+            }
+            // New user - always show setup
+            setIsFirstTime(true);
+          }
+        } catch (error) {
+          console.error('Error loading categories:', error);
+          // Fall back to default categories locally only
+          setCategories(DEFAULT_CATEGORIES);
+        }
         
-        const savedTheme = localStorage.getItem('theme');
-        if (savedTheme) setTheme(savedTheme);
+        // Load transactions from backend
+        try {
+          const transactionsData = await transactionsAPI.getAll();
+          if (transactionsData && transactionsData.length > 0) {
+            const formattedTransactions = transactionsData.map(trans => ({
+              id: trans.id,
+              categoryId: trans.category_id,
+              categoryName: trans.category_name,
+              amount: parseFloat(trans.amount),
+              description: trans.description,
+              date: trans.date,
+              weekKey: trans.week_key
+            }));
+            console.log('Loaded transactions from backend:', formattedTransactions.length);
+            setTransactions(formattedTransactions);
+          } else {
+            console.log('No transactions found');
+            setTransactions([]);
+          }
+        } catch (error) {
+          console.error('Error loading transactions:', error);
+          setTransactions([]);
+        }
         
-        const income = localStorage.getItem('monthly_income');
-        if (income) setMonthlyIncome(parseFloat(income));
+        // TODO Phase 4: Load extra income, weekly budgets, monthly savings
         
-        const extra = localStorage.getItem('extra_income');
-        if (extra) setExtraIncome(parseFloat(extra));
-        
-        const extraIncomeTrans = localStorage.getItem('extra_income_transactions');
-        if (extraIncomeTrans) setExtraIncomeTransactions(JSON.parse(extraIncomeTrans));
-        
-        const cats = localStorage.getItem('categories');
-        if (cats) setCategories(JSON.parse(cats));
-        
-        const trans = localStorage.getItem('transactions');
-        if (trans) setTransactions(JSON.parse(trans));
-        
-        const history = localStorage.getItem('monthly_history');
-        if (history) setMonthlyHistory(JSON.parse(history));
-        
-        const weeklyBudgetsData = localStorage.getItem('weekly_budgets');
-        if (weeklyBudgetsData) setWeeklyBudgets(JSON.parse(weeklyBudgetsData));
-        
-        const weeklySpendingData = localStorage.getItem('weekly_spending');
-        if (weeklySpendingData) setWeeklySpending(JSON.parse(weeklySpendingData));
-        
-        const weeklyRolloversData = localStorage.getItem('weekly_rollovers');
-        if (weeklyRolloversData) setWeeklyRollovers(JSON.parse(weeklyRolloversData));
-        
-        const monthlySavingsData = localStorage.getItem('monthly_savings');
-        if (monthlySavingsData) setMonthlySavings(JSON.parse(monthlySavingsData));
+      } catch (error) {
+        console.error('Error loading data:', error);
+      } finally {
+        // Done loading - show the app
+        setIsLoading(false);
       }
-    } catch (error) {
-      console.log('First time user or storage error:', error);
-    }
+    };
+    
+    loadData();
   }, []);
 
   // Save data to localStorage
@@ -235,7 +320,6 @@ const App = () => {
       localStorage.setItem('monthly_income', monthlyIncome.toString());
       localStorage.setItem('extra_income', extraIncome.toString());
       localStorage.setItem('extra_income_transactions', JSON.stringify(extraIncomeTransactions));
-      localStorage.setItem('categories', JSON.stringify(categories));
       localStorage.setItem('transactions', JSON.stringify(transactions));
       localStorage.setItem('monthly_history', JSON.stringify(monthlyHistory));
       localStorage.setItem('weekly_budgets', JSON.stringify(weeklyBudgets));
@@ -306,13 +390,47 @@ const App = () => {
     saveData();
   };
 
-  const handleSetupIncome = (value) => {
-    setMonthlyIncome(parseFloat(value) || 0);
+  const handleSetupIncome = async (value) => {
+    const income = parseFloat(value) || 0;
+    setMonthlyIncome(income);
+    
+    // Scale category budgets proportionally to new income
+    // Default total is $3000, scale all categories to match new income
+    const defaultTotal = 3000; // Sum of all DEFAULT_CATEGORIES limits
+    const ratio = income / defaultTotal;
+    
+    const scaledCategories = categories.map(cat => ({
+      ...cat,
+      limit: Math.round(cat.limit * ratio)
+    }));
+    
+    setCategories(scaledCategories);
+    
+    // Save income to backend
+    try {
+      await userAPI.updateSettings({ monthly_income: income });
+    } catch (error) {
+      console.error('Error saving income:', error);
+    }
+    
     setSetupStep(1);
   };
 
-  const handleSetupCategories = () => {
-    setSetupStep(2);
+  const handleSetupCategories = async () => {
+    // Update all category limits in backend
+    try {
+      for (const cat of categories) {
+        await categoriesAPI.update(cat.id, {
+          name: cat.name,
+          limit: cat.limit
+        });
+      }
+    } catch (error) {
+      console.error('Error updating categories:', error);
+    }
+    
+    setIsFirstTime(false); // Setup complete!
+    setSetupStep(0); // Reset for next time
   };
 
   const updateCategoryLimit = (id, newLimit) => {
@@ -321,40 +439,58 @@ const App = () => {
     ));
   };
 
-  const addTransaction = () => {
+  const addTransaction = async () => {
     if (!quickAmount || !quickCategory || !quickDescription.trim()) return;
     
     const amount = parseFloat(quickAmount);
     const transactionDate = quickDate + 'T12:00:00.000Z';
     const weekKey = getWeekKey(quickDate);
     
-    const newTransaction = {
-      id: Date.now(),
-      categoryId: quickCategory.id,
-      amount: amount,
-      description: quickDescription.trim(),
-      date: transactionDate,
-      categoryName: quickCategory.name,
-      month: quickDate.slice(0, 7), // YYYY-MM format
-      weekKey: weekKey
-    };
-    
-    setTransactions([newTransaction, ...transactions].sort((a, b) => new Date(b.date) - new Date(a.date)));
-    setCategories(categories.map(cat =>
-      cat.id === quickCategory.id ? { ...cat, spent: cat.spent + amount } : cat
-    ));
-    
-    // Update weekly spending
-    setWeeklySpending(prev => ({
-      ...prev,
-      [weekKey]: (prev[weekKey] || 0) + amount
-    }));
-    
-    setQuickAmount('');
-    setQuickCategory(null);
-    setQuickDescription('');
-    setQuickDate(new Date().toISOString().slice(0, 10));
-    setShowQuickAdd(false);
+    try {
+      // Save to backend
+      const newTransaction = await transactionsAPI.create({
+        category_id: quickCategory.id,
+        amount: amount,
+        description: quickDescription.trim(),
+        date: transactionDate,
+        week_key: weekKey
+      });
+      
+      // Update local state
+      const formattedTransaction = {
+        id: newTransaction.id,
+        categoryId: quickCategory.id,
+        amount: amount,
+        description: quickDescription.trim(),
+        date: transactionDate,
+        categoryName: quickCategory.name,
+        month: quickDate.slice(0, 7),
+        weekKey: weekKey
+      };
+      
+      setTransactions([formattedTransaction, ...transactions].sort((a, b) => new Date(b.date) - new Date(a.date)));
+      
+      // Update category spent (backend does this too, but update local state for instant feedback)
+      setCategories(categories.map(cat =>
+        cat.id === quickCategory.id ? { ...cat, spent: cat.spent + amount } : cat
+      ));
+      
+      // Update weekly spending (Phase 4 will move this to backend)
+      setWeeklySpending(prev => ({
+        ...prev,
+        [weekKey]: (prev[weekKey] || 0) + amount
+      }));
+      
+      // Clear form
+      setQuickAmount('');
+      setQuickCategory(null);
+      setQuickDescription('');
+      setQuickDate(new Date().toISOString().slice(0, 10));
+      setShowQuickAdd(false);
+    } catch (error) {
+      console.error('Error adding transaction:', error);
+      alert('Failed to add expense. Please try again.');
+    }
   };
 
   // Edit income
@@ -363,11 +499,63 @@ const App = () => {
     setShowEditIncome(true);
   };
 
-  const saveIncome = () => {
+  const saveIncome = async () => {
     const newIncome = parseFloat(editIncomeValue);
     if (newIncome > 0) {
+      const oldIncome = monthlyIncome;
+      
+      // Check if user wants to adjust budgets proportionally
+      if (categories.length > 0 && newIncome !== oldIncome) {
+        const shouldAdjust = window.confirm(
+          `Adjust category budgets proportionally?\n\n` +
+          `Old income: $${oldIncome.toFixed(2)}\n` +
+          `New income: $${newIncome.toFixed(2)}\n\n` +
+          `Click OK to scale all budgets, or Cancel to keep budgets the same.`
+        );
+        
+        if (shouldAdjust) {
+          const ratio = newIncome / oldIncome;
+          
+          // Update each category proportionally
+          const updatedCategories = [];
+          for (const cat of categories) {
+            const newLimit = Math.round(cat.limit * ratio);
+            try {
+              await categoriesAPI.update(cat.id, {
+                name: cat.name,
+                limit: newLimit
+              });
+              updatedCategories.push({ ...cat, limit: newLimit });
+            } catch (error) {
+              console.error(`Failed to update ${cat.name}:`, error);
+              updatedCategories.push(cat); // Keep old value if update fails
+            }
+          }
+          setCategories(updatedCategories);
+        }
+      }
+      
+      // Save income to backend
+      try {
+        await userAPI.updateSettings({ monthly_income: newIncome });
+      } catch (error) {
+        console.error('Error saving income:', error);
+      }
+      
       setMonthlyIncome(newIncome);
       setShowEditIncome(false);
+    }
+  };
+
+  // Select theme and save to backend
+  const selectTheme = async (themeName) => {
+    try {
+      await userAPI.updateSettings({ theme: themeName });
+      setTheme(themeName);
+    } catch (error) {
+      console.error('Error saving theme:', error);
+      // Still update locally even if save fails
+      setTheme(themeName);
     }
   };
 
@@ -378,27 +566,39 @@ const App = () => {
     setEditCategoryLimit(category.limit.toString());
     setShowEditCategory(true);
   };
-
-  const saveCategory = () => {
+  
+  const saveCategory = async () => {
     if (!editCategoryName.trim() || !editCategoryLimit) return;
     
-    setCategories(categories.map(cat =>
-      cat.id === editingCategory.id
-        ? { ...cat, name: editCategoryName.trim(), limit: parseFloat(editCategoryLimit) }
-        : cat
-    ));
-    
-    // Update transaction names if category was renamed
-    if (editCategoryName !== editingCategory.name) {
-      setTransactions(transactions.map(trans =>
-        trans.categoryId === editingCategory.id
-          ? { ...trans, categoryName: editCategoryName.trim() }
-          : trans
+    try {
+      // Update in backend
+      await categoriesAPI.update(editingCategory.id, {
+        name: editCategoryName.trim(),
+        limit: parseFloat(editCategoryLimit)
+      });
+
+      // Update local state
+      setCategories(categories.map(cat =>
+        cat.id === editingCategory.id
+          ? { ...cat, name: editCategoryName.trim(), limit: parseFloat(editCategoryLimit) }
+          : cat
       ));
+      
+      // Update transaction names if category was renamed
+      if (editCategoryName !== editingCategory.name) {
+        setTransactions(transactions.map(trans =>
+          trans.categoryId === editingCategory.id
+            ? { ...trans, categoryName: editCategoryName.trim() }
+            : trans
+        ));
+      }
+      
+      setShowEditCategory(false);
+      setEditingCategory(null);
+    } catch (error) {
+      console.error('Error updating category:', error);
+      alert('Failed to update category. Please try again.');
     }
-    
-    setShowEditCategory(false);
-    setEditingCategory(null);
   };
 
   // Add new category
@@ -408,25 +608,47 @@ const App = () => {
     setShowAddCategory(true);
   };
 
-  const addNewCategory = () => {
-    if (!newCategoryName.trim() || !newCategoryLimit) return;
-    
-    const newCategory = {
-      id: Date.now(),
-      name: newCategoryName.trim(),
-      limit: parseFloat(newCategoryLimit),
-      spent: 0
-    };
-    
-    setCategories([...categories, newCategory]);
-    setShowAddCategory(false);
+  const addCategory = async () => {
+    const limit = parseFloat(newCategoryLimit);
+    if (newCategoryName.trim() && limit > 0) {
+      try {
+        // Save to backend
+        const newCategory = await categoriesAPI.create({
+          name: newCategoryName.trim(),
+          limit: limit
+        });
+
+        // Update local state
+        setCategories([...categories, {
+          id: newCategory.id,
+          name: newCategory.name,
+          limit: parseFloat(newCategory.limit_amount),
+          spent: 0
+        }]);
+        
+        setShowAddCategory(false);
+      } catch (error) {
+        console.error('Error adding category:', error);
+        alert('Failed to add category. Please try again.');
+      }
+    }
   };
 
+
   // Delete category
-  const deleteCategory = (categoryId) => {
-    if (window.confirm('Are you sure you want to delete this category? All transactions in this category will be removed.')) {
-      setCategories(categories.filter(cat => cat.id !== categoryId));
-      setTransactions(transactions.filter(trans => trans.categoryId !== categoryId));
+  const deleteCategory = async (cat) => {
+    if (window.confirm(`Delete "${cat.name}" category? All transactions in this category will also be deleted.`)) {
+      try {
+        // Delete from backend
+        await categoriesAPI.delete(cat.id);
+
+        // Update local state
+        setCategories(categories.filter(c => c.id !== cat.id));
+        setTransactions(transactions.filter(t => t.categoryId !== cat.id));
+      } catch (error) {
+        console.error('Error deleting category:', error);
+        alert('Failed to delete category. Please try again.');
+      }
     }
   };
 
@@ -516,22 +738,32 @@ const App = () => {
   };
 
   // Delete expense
-  const deleteExpense = (expenseId) => {
+  const deleteExpense = async (expenseId) => {
     if (window.confirm('Are you sure you want to delete this expense?')) {
       const expense = transactions.find(t => t.id === expenseId);
       if (expense) {
-        // Remove from transactions
-        setTransactions(transactions.filter(t => t.id !== expenseId));
-        // Update category spent amount
-        setCategories(categories.map(cat =>
-          cat.id === expense.categoryId ? { ...cat, spent: cat.spent - expense.amount } : cat
-        ));
-        // Update weekly spending
-        if (expense.weekKey) {
-          setWeeklySpending(prev => ({
-            ...prev,
-            [expense.weekKey]: Math.max(0, (prev[expense.weekKey] || 0) - expense.amount)
-          }));
+        try {
+          // Delete from backend
+          await transactionsAPI.delete(expenseId);
+          
+          // Update local state
+          setTransactions(transactions.filter(t => t.id !== expenseId));
+          
+          // Update category spent amount
+          setCategories(categories.map(cat =>
+            cat.id === expense.categoryId ? { ...cat, spent: cat.spent - expense.amount } : cat
+          ));
+          
+          // Update weekly spending (Phase 4 will move to backend)
+          if (expense.weekKey) {
+            setWeeklySpending(prev => ({
+              ...prev,
+              [expense.weekKey]: Math.max(0, (prev[expense.weekKey] || 0) - expense.amount)
+            }));
+          }
+        } catch (error) {
+          console.error('Error deleting expense:', error);
+          alert('Failed to delete expense. Please try again.');
         }
       }
     }
@@ -547,7 +779,7 @@ const App = () => {
     setShowEditExpense(true);
   };
 
-  const saveExpense = () => {
+  const saveExpense = async () => {
     if (!editExpenseDescription.trim() || !editExpenseAmount || !editExpenseCategory) return;
     
     const oldExpense = editingExpense;
@@ -556,58 +788,72 @@ const App = () => {
     const newWeekKey = getWeekKey(editExpenseDate);
     const oldWeekKey = oldExpense.weekKey;
     
-    // Update transaction
-    setTransactions(transactions.map(trans =>
-      trans.id === oldExpense.id
-        ? {
-            ...trans,
-            description: editExpenseDescription.trim(),
-            amount: newAmount,
-            date: editExpenseDate + 'T12:00:00.000Z',
-            categoryId: editExpenseCategory.id,
-            categoryName: editExpenseCategory.name,
-            month: editExpenseDate.slice(0, 7),
-            weekKey: newWeekKey
+    try {
+      // Update in backend
+      await transactionsAPI.update(oldExpense.id, {
+        category_id: editExpenseCategory.id,
+        amount: newAmount,
+        description: editExpenseDescription.trim(),
+        date: editExpenseDate + 'T12:00:00.000Z',
+        week_key: newWeekKey
+      });
+      
+      // Update local state
+      setTransactions(transactions.map(trans =>
+        trans.id === oldExpense.id
+          ? {
+              ...trans,
+              description: editExpenseDescription.trim(),
+              amount: newAmount,
+              date: editExpenseDate + 'T12:00:00.000Z',
+              categoryId: editExpenseCategory.id,
+              categoryName: editExpenseCategory.name,
+              month: editExpenseDate.slice(0, 7),
+              weekKey: newWeekKey
+            }
+          : trans
+      ).sort((a, b) => new Date(b.date) - new Date(a.date)));
+      
+      // Update category spent amounts (backend handles this too, but update local for instant feedback)
+      if (oldExpense.categoryId === editExpenseCategory.id) {
+        // Same category, just adjust the difference
+        setCategories(categories.map(cat =>
+          cat.id === editExpenseCategory.id ? { ...cat, spent: cat.spent + amountDiff } : cat
+        ));
+      } else {
+        // Different category, subtract from old and add to new
+        setCategories(categories.map(cat => {
+          if (cat.id === oldExpense.categoryId) {
+            return { ...cat, spent: cat.spent - oldExpense.amount };
+          } else if (cat.id === editExpenseCategory.id) {
+            return { ...cat, spent: cat.spent + newAmount };
           }
-        : trans
-    ).sort((a, b) => new Date(b.date) - new Date(a.date)));
-    
-    // Update category spent amounts
-    if (oldExpense.categoryId === editExpenseCategory.id) {
-      // Same category, just adjust the difference
-      setCategories(categories.map(cat =>
-        cat.id === editExpenseCategory.id ? { ...cat, spent: cat.spent + amountDiff } : cat
-      ));
-    } else {
-      // Different category, subtract from old and add to new
-      setCategories(categories.map(cat => {
-        if (cat.id === oldExpense.categoryId) {
-          return { ...cat, spent: cat.spent - oldExpense.amount };
-        } else if (cat.id === editExpenseCategory.id) {
-          return { ...cat, spent: cat.spent + newAmount };
-        }
-        return cat;
-      }));
+          return cat;
+        }));
+      }
+      
+      // Update weekly spending (Phase 4 will move to backend)
+      if (oldWeekKey === newWeekKey) {
+        // Same week, just adjust the difference
+        setWeeklySpending(prev => ({
+          ...prev,
+          [newWeekKey]: (prev[newWeekKey] || 0) + amountDiff
+        }));
+      } else {
+        // Different week, subtract from old and add to new
+        setWeeklySpending(prev => ({
+          ...prev,
+          [oldWeekKey]: Math.max(0, (prev[oldWeekKey] || 0) - oldExpense.amount),
+          [newWeekKey]: (prev[newWeekKey] || 0) + newAmount
+        }));
+      }
+      
+      setShowEditExpense(false);
+      setEditingExpense(null);
+    } catch (error) {
+      console.error('Error updating expense:', error);
+      alert('Failed to update expense. Please try again.');
     }
-    
-    // Update weekly spending
-    if (oldWeekKey === newWeekKey) {
-      // Same week, just adjust the difference
-      setWeeklySpending(prev => ({
-        ...prev,
-        [newWeekKey]: (prev[newWeekKey] || 0) + amountDiff
-      }));
-    } else {
-      // Different week, subtract from old and add to new
-      setWeeklySpending(prev => ({
-        ...prev,
-        [oldWeekKey]: Math.max(0, (prev[oldWeekKey] || 0) - oldExpense.amount),
-        [newWeekKey]: (prev[newWeekKey] || 0) + newAmount
-      }));
-    }
-    
-    setShowEditExpense(false);
-    setEditingExpense(null);
   };
 
   // Month navigation
@@ -662,7 +908,8 @@ const App = () => {
   // Calculate safe to spend
   const totalBudgeted = categories.reduce((sum, cat) => sum + cat.limit, 0);
   const totalSpent = categories.reduce((sum, cat) => sum + cat.spent, 0);
-  const totalIncome = monthlyIncome + extraIncome;
+  const totalExtraIncome = extraIncomeTransactions.reduce((sum, trans) => sum + trans.amount, 0);
+  const totalIncome = monthlyIncome + totalExtraIncome;
   const safeToSpend = totalIncome - totalSpent;
   
   // Weekly calculations
@@ -683,6 +930,25 @@ const App = () => {
   const overspentAmount = Math.abs(Math.min(0, lastWeekDifference));
 
   // Setup wizard
+  // Show loading screen while data loads
+  if (isLoading) {
+    return (
+      <div style={{
+        minHeight: '100vh',
+        background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        color: 'white',
+        fontSize: '24px',
+        fontWeight: '700',
+        fontFamily: '"DM Sans", system-ui, -apple-system, sans-serif'
+      }}>
+        Loading...
+      </div>
+    );
+  }
+
   if (isFirstTime) {
     return (
       <div style={{
@@ -1907,7 +2173,7 @@ const App = () => {
                 {Object.entries(THEMES).map(([key, themeOption]) => (
                   <button
                     key={key}
-                    onClick={() => setTheme(key)}
+                    onClick={() => selectTheme(key)}
                     style={{
                       padding: '16px',
                       background: theme === key ? themeOption.gradient : 'white',
@@ -2030,7 +2296,7 @@ const App = () => {
                       <Edit2 size={16} />
                     </button>
                     <button
-                      onClick={() => deleteCategory(cat.id)}
+                      onClick={() => deleteCategory(cat)}
                       style={{
                         background: '#ef4444',
                         color: 'white',
@@ -2314,7 +2580,7 @@ const App = () => {
                 Cancel
               </button>
               <button
-                onClick={addNewCategory}
+                onClick={addCategory}
                 disabled={!newCategoryName.trim() || !newCategoryLimit}
                 style={{
                   flex: 1,
