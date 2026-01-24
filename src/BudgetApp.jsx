@@ -501,49 +501,16 @@ const App = () => {
 
   const saveIncome = async () => {
     const newIncome = parseFloat(editIncomeValue);
-    if (newIncome > 0) {
-      const oldIncome = monthlyIncome;
-      
-      // Check if user wants to adjust budgets proportionally
-      if (categories.length > 0 && newIncome !== oldIncome) {
-        const shouldAdjust = window.confirm(
-          `Adjust category budgets proportionally?\n\n` +
-          `Old income: $${oldIncome.toFixed(2)}\n` +
-          `New income: $${newIncome.toFixed(2)}\n\n` +
-          `Click OK to scale all budgets, or Cancel to keep budgets the same.`
-        );
-        
-        if (shouldAdjust) {
-          const ratio = newIncome / oldIncome;
-          
-          // Update each category proportionally
-          const updatedCategories = [];
-          for (const cat of categories) {
-            const newLimit = Math.round(cat.limit * ratio);
-            try {
-              await categoriesAPI.update(cat.id, {
-                name: cat.name,
-                limit: newLimit
-              });
-              updatedCategories.push({ ...cat, limit: newLimit });
-            } catch (error) {
-              console.error(`Failed to update ${cat.name}:`, error);
-              updatedCategories.push(cat); // Keep old value if update fails
-            }
-          }
-          setCategories(updatedCategories);
-        }
-      }
-      
-      // Save income to backend
-      try {
-        await userAPI.updateSettings({ monthly_income: newIncome });
-      } catch (error) {
-        console.error('Error saving income:', error);
-      }
-      
+    if (newIncome <= 0) return;
+    
+    // Save income to backend
+    try {
+      await userAPI.updateSettings({ monthly_income: newIncome });
       setMonthlyIncome(newIncome);
       setShowEditIncome(false);
+    } catch (error) {
+      console.error('Error saving income:', error);
+      alert('Failed to save income. Please try again.');
     }
   };
 
@@ -2199,7 +2166,7 @@ const App = () => {
               marginBottom: '16px',
               boxShadow: '0 1px 3px rgba(0,0,0,0.1)'
             }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
                 <div>
                   <div style={{ fontWeight: '600', color: '#1e293b', marginBottom: '4px' }}>
                     Monthly Income
@@ -2227,6 +2194,65 @@ const App = () => {
                   Edit
                 </button>
               </div>
+              
+              {/* Scale Budgets Button */}
+              <button
+                onClick={async () => {
+                  const totalBudgeted = categories.reduce((sum, cat) => sum + cat.limit, 0);
+                  const ratio = monthlyIncome / totalBudgeted;
+                  
+                  const confirm = window.confirm(
+                    `Scale all category budgets to match your income?\n\n` +
+                    `Current total budgeted: $${totalBudgeted.toFixed(2)}\n` +
+                    `Monthly income: $${monthlyIncome.toFixed(2)}\n` +
+                    `Scale factor: ${ratio.toFixed(2)}x\n\n` +
+                    `This will multiply all budgets by ${ratio.toFixed(2)}.`
+                  );
+                  
+                  if (confirm) {
+                    const updatedCategories = [];
+                    let anyFailed = false;
+                    
+                    for (const cat of categories) {
+                      const newLimit = Math.round(cat.limit * ratio);
+                      try {
+                        await categoriesAPI.update(cat.id, {
+                          name: cat.name,
+                          limit: newLimit
+                        });
+                        updatedCategories.push({ ...cat, limit: newLimit });
+                      } catch (error) {
+                        console.error(`Failed to update ${cat.name}:`, error);
+                        updatedCategories.push(cat);
+                        anyFailed = true;
+                      }
+                    }
+                    
+                    setCategories(updatedCategories);
+                    
+                    if (anyFailed) {
+                      alert('Some categories failed to update. Check console for details.');
+                    } else {
+                      alert('All budgets scaled successfully!');
+                    }
+                  }
+                }}
+                style={{
+                  width: '100%',
+                  padding: '16px',
+                  background: currentTheme.gradient,
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '12px',
+                  cursor: 'pointer',
+                  fontWeight: '700',
+                  fontSize: '16px',
+                  marginTop: '12px',
+                  boxShadow: '0 4px 6px rgba(0,0,0,0.1)'
+                }}
+              >
+                📊 Scale All Budgets to Match Income
+              </button>
             </div>
 
             {/* Categories */}
